@@ -182,11 +182,6 @@ class DG_solver():
                 device=self.device)
 
 
-        print("mass_matrix_inv", self.mass_matrix_inv.shape)
-        print("quadrature_weights", self.quadrature_weights.shape)
-        print("basis_func", self.basis_func.shape)
-        print("interp_ic", interp_ic.shape)
-        print("solution_DG", solution_DG.shape)
         temp = self.mass_matrix_inv * self.quadrature_weights * self.basis_func  
         # temp has shape [1, n_poly, points_per_cell]; squeeze the singleton batch dimension:
         temp = temp.squeeze(0)  # now shape [n_poly, points_per_cell]
@@ -221,6 +216,14 @@ class DG_solver():
 
                 solution_DG[:, :, t] = torch.einsum('ijk,ijl->ikl', self.basis_func, weights_dg).permute(0, 2, 1).reshape(n_ic, -1)
         return solution_DG
+    
+    def cell_averaging(self, solution_dg):
+        """post processing of the solution_DG tensor to aveage it over each cell"""
+         #solution_dg is of shape (n_cells, n_cells*points_per_cell, t_max), we want to average over the points_per_cell
+        ic= solution_dg.shape[0]
+        solution_dg = solution_dg.reshape(ic, self.n_cells, self.points_per_cell, self.t_max)
+        solution_dg = solution_dg.mean(dim=2)
+        return solution_dg
 
 
 
