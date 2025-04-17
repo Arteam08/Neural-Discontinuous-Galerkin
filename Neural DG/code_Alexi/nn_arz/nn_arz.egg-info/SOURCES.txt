@@ -1,0 +1,12 @@
+pyproject.toml
+nn_arz/__init__.py
+nn_arz/datasets.py
+nn_arz/explicit.py
+nn_arz/models.py
+nn_arz/numerical_schemes.py
+nn_arz/utils.py
+nn_arz.egg-info/PKG-INFO
+nn_arz.egg-info/SOURCES.txt
+nn_arz.egg-info/dependency_links.txt
+nn_arz.egg-info/requires.txt
+nn_arz.egg-info/top_level.txt
