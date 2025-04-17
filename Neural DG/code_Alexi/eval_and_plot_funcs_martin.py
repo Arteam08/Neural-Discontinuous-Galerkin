@@ -9,42 +9,50 @@ from torch.utils.data import Dataset, DataLoader
 
 
 import os
-import torch
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
 
-def run_solver(solver, dataset_path, batch_size,  plot_path):
+def run_solver(solver, dataset_path, batch_size, plot_path):
     """
-    Run the solver, compute per-sample L2 error in one pass (no list),
-    save results, and output comparison heatmaps for the first 3 ICs.
+    Run the solver, compute per-sample absolute & relative L2 errors in one pass,
+    and output comparison heatmaps for the first 3 ICs.
     """
-    device=solver.device
+    device = solver.device
+
     # Load dataset
     ds = HyperbolicDataset(dataset_path)
     N = len(ds)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
 
-    # Pre-allocate error tensor
-    l2_errors = torch.empty(N, device=device)
+    # Pre-allocate error tensors
+    l2_errors      = torch.empty(N, device=device)  # (N,)
+    rel_l2_errors  = torch.empty(N, device=device)  # (N,)
 
     # Batch-wise solve & error
     for batch_idx, batch in enumerate(loader):
         start = batch_idx * batch_size
         end   = start + batch['ic'].shape[0]
 
-        ic        = batch['ic'].to(device)         # (B, 2)
-        sol_exact = batch['sol_exact'].to(device)  # (B, C, T)
+        ic         = batch['ic'].to(device)         # (B, 2)
+        sol_exact  = batch['sol_exact'].to(device)  # (B, C, T)
 
-        # DG solve + average → (B, C, T)
+        # DG solve + averaging → (B, C, T)
         sol_DG_large = solver.solve(ic)
         sol_DG       = solver.cell_averaging(sol_DG_large)
 
-        # Compute L2 norm for each sample and store
-        diff = sol_DG - sol_exact
-        l2_batch = torch.sqrt((diff**2).view(diff.shape[0], -1).sum(dim=1))
-        l2_errors[start:end] = l2_batch
+        # flatten spatial/time dims
+        diff = sol_DG - sol_exact                  # (B, C, T)
+        flat_diff = diff.view(diff.shape[0], -1)   # (B, C*T)
+        flat_exact = sol_exact.view(sol_exact.shape[0], -1)  # (B, C*T)
 
+        # absolute L2 per sample
+        l2_batch = torch.sqrt((flat_diff**2).sum(dim=1))       # (B,)
+        # exact-solution L2 per sample
+        norm_exact = torch.sqrt((flat_exact**2).sum(dim=1))   # (B,)
+        # relative L2 = abs / exact
+        rel_l2_batch = l2_batch / norm_exact                  # (B,)
 
+        # store
+        l2_errors[start:end]     = l2_batch
+        rel_l2_errors[start:end] = rel_l2_batch
 
     # --- Plot heatmaps for the first 3 ICs ---
     full_data = torch.load(dataset_path)
@@ -65,9 +73,10 @@ def run_solver(solver, dataset_path, batch_size,  plot_path):
     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
     fig.savefig(plot_path)
     plt.close(fig)
+
+    # report mean errors
+    mean_abs = l2_errors.mean().item()
+    mean_rel = rel_l2_errors.mean().item()
     print(f"Saved comparison heatmaps to {plot_path}")
-    print("l2_error", l2_errors.mean())
-
-        
-
-
+    print(f"Mean absolute L2 error: {mean_abs:.4e}")
+    print(f"Mean relative L2 error: {mean_rel:.4e}")

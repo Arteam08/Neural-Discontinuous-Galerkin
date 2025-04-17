@@ -81,16 +81,16 @@ def generate_riemann_dataset(
     print(f"Saved dataset with {n_ic} samples to {path}",f"Saved dataset with {n_ic} samples to {path}")
 
 
-
+# à comprendre en détails
 def generate_piecewise_constant_dataset(
     save_folder: str,
     filename: str = "piecewise_dataset.pt",
-    ic_boundaries: np.ndarray = [0, 4],
-    N_ic_range: int = 14,
+    N_pieces=10,
+    amplitude: float = 4.,
+    n_ic=20,
     dx: float = 1e-2,
     n_cells: int = 20,
     points_per_cell: int = 10,
-    n_poly: int = 2,
     t_max: int = 600,
     dt: float = 1e-4,
     batch_size: int = 3,  # (batch,)
@@ -108,16 +108,7 @@ def generate_piecewise_constant_dataset(
     """
     os.makedirs(save_folder, exist_ok=True)
 
-    ic_range = np.linspace(ic_boundaries[0], ic_boundaries[1], N_ic_range)
-    points = np.array([[c1, c2]
-                       for c1 in ic_range for c2 in ic_range
-                       if c1 != c2], dtype=np.float32)
-    n_ic = len(points)
-
-    # (n_ic, 2)
-    c1 = torch.from_numpy(points[:, 0]).to(device)
-    c2 = torch.from_numpy(points[:, 1]).to(device)
-    ic_tensor = torch.stack([c1, c2], dim=1)  # (n_ic, 2)
+    ic_tensor = amplitude*torch.rand(n_ic, N_pieces, device=device)
 
     # (n_cells,)
     x = torch.linspace(-dx * n_cells/2, dx * n_cells/2, n_cells, device=device)  # (n_cells,)
@@ -125,15 +116,14 @@ def generate_piecewise_constant_dataset(
     time = torch.arange(1, t_max+1, device=device) * dt  # (t_max,)
 
     # allocate exact solution array (n_ic, n_cells, t_max)
-    sol_exact = torch.empty((n_ic, n_cells, t_max), device=device)  # (n_ic, n_cells, t_max)
+    sol_exact = torch.empty((n_ic, n_cells, t_max), device=device)  # (n_ic, space, time)
 
-    # batch solve with Lax-Hopf and downsample to cell average
     for i in range((n_ic + batch_size - 1) // batch_size):
         start = i * batch_size
-        end = min((i + 1) * batch_size, n_ic)
-        batch_ic = ic_tensor[start:end]  # (batch, 2)
+        end   = min((i + 1) * batch_size, n_ic)
+        batch_ic = ic_tensor[start:end]  # (batch, space)
 
-        # solver returns (batch, n_cells*ratio, t_max)
+        # solver returns (batch, time, space*ratio)
         temp = nn_arz.nn_arz.lwr.lax_hopf.Lax_Hopf_solver_Greenshield(
             batch_ic,
             dx=dx/ratio,
@@ -141,13 +131,23 @@ def generate_piecewise_constant_dataset(
             Nx=n_cells * ratio,
             Nt=t_max,
             device=device
-        )  # (batch, n_cells*ratio, t_max)
+        )  # temp: (B, T, X*R)
 
-        # reshape and average over ratio to get (batch, n_cells, t_max)
-        temp = temp.reshape(temp.shape[0], n_cells, ratio, t_max)  # (batch, n_cells, ratio, t_max)
-        batch_sol = temp.mean(dim=2)  # (batch, n_cells, t_max)
+        # reshape time‑major → (B, T, X, R)
+        temp = temp.reshape(
+            temp.shape[0],        # B
+            temp.shape[1],        # T
+            temp.shape[2] // ratio,  # X
+            ratio                 # R
+        )  # (B, T, space, ratio)
 
-        sol_exact[start:end] = batch_sol  # (batch, n_cells, t_max)
+        # average over the 'ratio' axis → (B, T, space)
+        temp = temp.mean(dim=3)  # (B, T, space)
+
+        # swap axes to get (B, space, T)
+        batch_sol = temp.transpose(1, 2)  # (B, space, time)
+
+        sol_exact[start:end] = batch_sol  # write into (n_ic, space, time)
 
     dataset = {
         "ic":        ic_tensor,   # (n_ic, 2)

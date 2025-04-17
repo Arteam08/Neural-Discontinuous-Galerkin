@@ -119,40 +119,7 @@ class DG_solver():
         self.left_polynomials_value = left_polynomials_value
         self.right_polynomials_value = right_polynomials_value
 
-    
-    def compute_L(self,solution_DG, t, a):
-        n_ic = solution_DG.shape[0]
-        left_boundaries = solution_DG[:, self.left_boundary_indexes, t+a-1]
-        right_boundaries = solution_DG[:, self.right_boundary_indexes, t+a-1]
-
-        fluxes = self.flow_func(left_boundaries, right_boundaries) # à modifier pour accpeter des formes plus générales
-
-        # !! Right polynomial values not implemented
-        self.left_polynomials_value=torch.tensor([1, -1], device=self.device).repeat(self.n_poly// 2 + 1)[:self.n_poly].unsqueeze(0).unsqueeze(-1)
-        fluxes = fluxes[:, 1:].unsqueeze(1) - fluxes[:, :-1].unsqueeze(1) * self.left_polynomials_value
-                        
-        fluxes = (self.mass_matrix_inv * fluxes)
-        # plt.plot(fluxes[0, 1,:].cpu().detach().numpy())
-        # plt.show()
-                        
-        f_u = self.f_PDE(solution_DG[:, :, t+a-1])
-
-            
-        residual = (
-            self.mass_matrix_inv * (
-                self.quadrature_weights.unsqueeze(-1) * (
-                    self.basis_func_prime.unsqueeze(-1) * f_u.view(
-                        n_ic, 
-                        self.n_cells,
-                        self.points_per_cell
-                    ).transpose(1, 2).unsqueeze(1)
-                ) 
-            ).sum(dim=2) * self.dx / 2
-        ).float() # M^-1*(f|phi')
-        L=-fluxes+residual
-        return L
-    
-    def process_initial_conditions(self, initial_conditions):
+     def process_initial_conditions(self, initial_conditions):
         
         """initialize the decompositons weights and solution tensor
         initial_conditions: tensor of shape (n_ic, some_discretization)
@@ -166,7 +133,6 @@ class DG_solver():
 
         #only for Riemann
         interp_ic = piecewise_constant_interpolate(initial_conditions, self.n_cells*self.points_per_cell) 
-
 
         interp_ic=interp_ic.squeeze(1) # shape (n_ic, n_cells*points_per_cell)
         #decompose it by cell
@@ -202,6 +168,41 @@ class DG_solver():
 
 
         return weights_dg, solution_DG, n_ic
+
+    
+    def compute_L(self,solution_DG, t, a):
+        n_ic = solution_DG.shape[0]
+        left_boundaries = solution_DG[:, self.left_boundary_indexes, t+a-1] # shape : (n_ic, n_cells)
+        right_boundaries = solution_DG[:, self.right_boundary_indexes, t+a-1]
+
+        fluxes = self.flow_func(left_boundaries, right_boundaries) # à modifier pour accpeter des formes plus générales
+
+        # !! Right polynomial values not implemented
+        self.left_polynomials_value=torch.tensor([1, -1], device=self.device).repeat(self.n_poly// 2 + 1)[:self.n_poly].unsqueeze(0).unsqueeze(-1)
+        fluxes = fluxes[:, 1:].unsqueeze(1) - fluxes[:, :-1].unsqueeze(1) * self.left_polynomials_value
+                        
+        fluxes = (self.mass_matrix_inv * fluxes)
+        # plt.plot(fluxes[0, 1,:].cpu().detach().numpy())
+        # plt.show()
+                        
+        f_u = self.f_PDE(solution_DG[:, :, t+a-1])
+
+            
+        residual = (
+            self.mass_matrix_inv * (
+                self.quadrature_weights.unsqueeze(-1) * (
+                    self.basis_func_prime.unsqueeze(-1) * f_u.view(
+                        n_ic, 
+                        self.n_cells,
+                        self.points_per_cell
+                    ).transpose(1, 2).unsqueeze(1)
+                ) 
+            ).sum(dim=2) * self.dx / 2
+        ).float() # M^-1*(f|phi')
+        L=-fluxes+residual
+        return L
+    
+   
  
     def solve(self, initial_conditions):
         weights_dg, solution_DG, n_ic = self.process_initial_conditions(initial_conditions)
