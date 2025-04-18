@@ -55,7 +55,6 @@ x_max = dx * n_points / 2
 x = torch.linspace(-x_max, x_max, n_points, device=device)
 time = torch.arange(1, t_max + 1, device=device).unsqueeze(0) * dt
 
-
 ic = np.linspace(0, 4., N)
 points = np.array([[c1, c2] for c1 in ic for c2 in ic if c1 != c2])
 points_shock = np.array([[c1, c2] for c1 in ic for c2 in ic if c1 < c2])
@@ -71,13 +70,14 @@ riemann_ic = [c1, c2]
 shock_ic = [c1_shock, c2_shock]
 rarefaction_ic = [c1_rarefaction, c2_rarefaction]
 
-complex_ic = 4*torch.rand((N*(N-1), values_for_complex), device=device)
 solutions_riemann = nn_arz.nn_arz.lwr.explicit.greenshieldRiemannSolution(x, time, c1, c2) #true solution to Riemann
 ####computation of the complex solution
 ratio=10 # nombre de points pour calculer la moyenne dans l'intervalle avel lax_hopf=quadrature
 batch_size_complex = 1
 
 
+### complex ic
+complex_ic = 4*torch.rand((N*(N-1), values_for_complex), device=device)
 solution_complex = torch.empty((complex_ic.shape[0], n_points,t_max))
 for i in range(complex_ic.shape[0]//batch_size_complex):
     temp = nn_arz.nn_arz.lwr.lax_hopf.Lax_Hopf_solver_Greenshield(
@@ -94,6 +94,8 @@ for i in range(complex_ic.shape[0]//batch_size_complex):
         temp.shape[2] // ratio, 
         ratio)
     ).mean(dim=3).transpose(1, 2)
+
+
 
 
 

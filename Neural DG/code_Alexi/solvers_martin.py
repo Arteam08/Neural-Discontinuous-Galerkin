@@ -11,6 +11,8 @@ import nn_arz.nn_arz.lwr.lax_hopf
 import nn_arz.nn_arz.polynomials
 import time
 import matplotlib.pyplot as plt
+from generate_data_martin import *
+
 
 ###define default basis
 
@@ -64,7 +66,7 @@ def get_default_basis(n_poly, dx, points_per_cell, device):
     polynomials_prime = polynomials_prime.unsqueeze(0) / half_cell_size # rescale the derivative to the new domain
     polynomials = polynomials(x_polynomials).unsqueeze(0)
 
-    left_polynomials_value = torch.tensor([1, -1], device=device).repeat(n_poly// 2 + 1)[n_poly].unsqueeze(0).unsqueeze(-1)
+    left_polynomials_value = torch.tensor([1, -1], device=device).repeat(n_poly// 2 + 1)[:n_poly].unsqueeze(0).unsqueeze(-1)
     right_polynomials_value = torch.ones_like(left_polynomials_value)
     return polynomials, polynomials_prime, mass_matrix, mass_matrix_inv, weights_leggauss, left_polynomials_value, right_polynomials_value
 
@@ -119,39 +121,6 @@ class DG_solver():
         self.left_polynomials_value = left_polynomials_value
         self.right_polynomials_value = right_polynomials_value
 
-    
-    def compute_L(self,solution_DG, t, a):
-        n_ic = solution_DG.shape[0]
-        left_boundaries = solution_DG[:, self.left_boundary_indexes, t+a-1]
-        right_boundaries = solution_DG[:, self.right_boundary_indexes, t+a-1]
-
-        fluxes = self.flow_func(left_boundaries, right_boundaries) # à modifier pour accpeter des formes plus générales
-
-        # !! Right polynomial values not implemented
-        self.left_polynomials_value=torch.tensor([1, -1], device=self.device).repeat(self.n_poly// 2 + 1)[:self.n_poly].unsqueeze(0).unsqueeze(-1)
-        fluxes = fluxes[:, 1:].unsqueeze(1) - fluxes[:, :-1].unsqueeze(1) * self.left_polynomials_value
-                        
-        fluxes = (self.mass_matrix_inv * fluxes)
-        # plt.plot(fluxes[0, 1,:].cpu().detach().numpy())
-        # plt.show()
-                        
-        f_u = self.f_PDE(solution_DG[:, :, t+a-1])
-
-            
-        residual = (
-            self.mass_matrix_inv * (
-                self.quadrature_weights.unsqueeze(-1) * (
-                    self.basis_func_prime.unsqueeze(-1) * f_u.view(
-                        n_ic, 
-                        self.n_cells,
-                        self.points_per_cell
-                    ).transpose(1, 2).unsqueeze(1)
-                ) 
-            ).sum(dim=2) * self.dx / 2
-        ).float() # M^-1*(f|phi')
-        L=-fluxes+residual
-        return L
-    
     def process_initial_conditions(self, initial_conditions):
         
         """initialize the decompositons weights and solution tensor
@@ -167,7 +136,6 @@ class DG_solver():
         #only for Riemann
         interp_ic = piecewise_constant_interpolate(initial_conditions, self.n_cells*self.points_per_cell) 
 
-
         interp_ic=interp_ic.squeeze(1) # shape (n_ic, n_cells*points_per_cell)
         #decompose it by cell
         interp_ic = interp_ic.view(n_ic, self.n_cells, self.points_per_cell)
@@ -182,34 +150,58 @@ class DG_solver():
                 device=self.device)
 
 
-        print("mass_matrix_inv", self.mass_matrix_inv.shape)
-        print("quadrature_weights", self.quadrature_weights.shape)
-        print("basis_func", self.basis_func.shape)
-        print("interp_ic", interp_ic.shape)
-        print("solution_DG", solution_DG.shape)
         temp = self.mass_matrix_inv * self.quadrature_weights * self.basis_func  
         # temp has shape [1, n_poly, points_per_cell]; squeeze the singleton batch dimension:
         temp = temp.squeeze(0)  # now shape [n_poly, points_per_cell]
 
         weights_dg = torch.einsum('lp,icp->ilc', temp, interp_ic) * (self.dx / 2)
 
-        
-
-
-
-
-
-
         reconstructed_solution = torch.einsum('ilc,lk->ick', weights_dg, self.basis_func.squeeze(0))
         reconstructed_solution = reconstructed_solution.reshape(n_ic, self.n_cells * self.points_per_cell)
         solution_DG[:, :, 0] = reconstructed_solution
 
-
-
         return weights_dg, solution_DG, n_ic
- 
+
+    
+    def compute_L(self,solution_DG, t, a):
+        n_ic = solution_DG.shape[0]
+
+        u_prev = solution_DG[:, :, t+a-1]
+        # this is done to avoid the in-place operation and let the gradients be computed
+        u_prev = u_prev.clone()
+
+        left_boundaries  = u_prev[:, self.left_boundary_indexes]
+        right_boundaries = u_prev[:, self.right_boundary_indexes]
+        f_u   = self.f_PDE(u_prev)
+  
+
+        fluxes = self.flow_func(left_boundaries, right_boundaries) # à modifier pour accpeter des formes plus générales
+
+        # !! Right polynomial values not implemented
+        fluxes = fluxes[:, 1:].unsqueeze(1)*self.right_polynomials_value - fluxes[:, :-1].unsqueeze(1) * self.left_polynomials_value
+                        
+        fluxes = (self.mass_matrix_inv * fluxes)
+        # plt.plot(fluxes[0, 1,:].cpu().detach().numpy())
+        # plt.show()
+                        
+            
+        residual = (
+            self.mass_matrix_inv * (
+                self.quadrature_weights.unsqueeze(-1) * (
+                    self.basis_func_prime.unsqueeze(-1) * f_u.view(
+                        n_ic, 
+                        self.n_cells,
+                        self.points_per_cell
+                    ).transpose(1, 2).unsqueeze(1)
+                ) 
+            ).sum(dim=2) * self.dx / 2
+        ).float() # M^-1*(f|phi')
+        L=-fluxes+residual
+        return L
+    
     def solve(self, initial_conditions):
         weights_dg, solution_DG, n_ic = self.process_initial_conditions(initial_conditions)
+        assert solution_DG.shape==(n_ic, self.n_cells * self.points_per_cell, self.t_max), f"solution_DG shape {solution_DG.shape} is not correct"
         for t in range(1, self.t_max):
             weights_dg_save = weights_dg.clone() #Ut
             for a in range(2):
@@ -221,6 +213,105 @@ class DG_solver():
 
                 solution_DG[:, :, t] = torch.einsum('ijk,ijl->ikl', self.basis_func, weights_dg).permute(0, 2, 1).reshape(n_ic, -1)
         return solution_DG
+    
+    def cell_averaging(self, solution_dg):
+        """post processing of the solution_DG tensor to aveage it over each cell"""
+         #solution_dg is of shape (n_cells, n_cells*points_per_cell, t_max), we want to average over the points_per_cell
+        ic= solution_dg.shape[0]
+        solution_dg = solution_dg.reshape(ic, self.n_cells, self.points_per_cell, self.t_max)
+        solution_dg = solution_dg.mean(dim=2)
+        return solution_dg
+    
+    ####Running and plotting######
+    def plot_solver(self, dataset_path, batch_size, plot_path):
+        """
+        Run the solver, compute per-sample absolute & relative L2 errors in one pass,
+        and output comparison heatmaps for the first 3 ICs.
+        """
+        device = self.device
+
+        # Load dataset
+        ds = HyperbolicDataset(dataset_path)
+        N = len(ds)
+        loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+
+        # Pre-allocate error tensors
+        l2_errors      = torch.empty(N, device=device)  # (N,)
+        rel_l2_errors  = torch.empty(N, device=device)  # (N,)
+
+        # Batch-wise solve & error
+        for batch_idx, batch in enumerate(loader):
+            start = batch_idx * batch_size
+            end   = start + batch['ic'].shape[0]
+
+            ic         = batch['ic'].to(device)         # (B, 2)
+            sol_exact  = batch['sol_exact'].to(device)  # (B, C, T)
+
+            # DG solve + averaging → (B, C, T)
+            sol_DG_large = self.solve(ic)
+            sol_DG       = self.cell_averaging(sol_DG_large)
+
+            # flatten spatial/time dims
+            diff = sol_DG - sol_exact                  # (B, C, T)
+            flat_diff = diff.view(diff.shape[0], -1)   # (B, C*T)
+            flat_exact = sol_exact.view(sol_exact.shape[0], -1)  # (B, C*T)
+
+            # absolute L2 per sample
+            l2_batch = torch.sqrt((flat_diff**2).sum(dim=1))       # (B,)
+            # exact-solution L2 per sample
+            norm_exact = torch.sqrt((flat_exact**2).sum(dim=1))   # (B,)
+            # relative L2 = abs / exact
+            rel_l2_batch = l2_batch / norm_exact                  # (B,)
+
+            # store
+            l2_errors[start:end]     = l2_batch
+            rel_l2_errors[start:end] = rel_l2_batch
+
+        # --- Plot heatmaps for the first 3 ICs ---
+        full_data = torch.load(dataset_path)
+        fig, axes = plt.subplots(3, 2, figsize=(10, 12))
+        for i in range(3):
+            exact = full_data['sol_exact'][i].cpu().numpy()  # (C, T)
+            dg    = self.cell_averaging(
+                        self.solve(full_data['ic'][i:i+1].to(device))
+                    )[0].cpu().numpy()  # (C, T)
+
+            ax_e, ax_d = axes[i, 0], axes[i, 1]
+            ax_e.imshow(exact, aspect='auto')
+            ax_e.set(title=f'Exact IC #{i}', xlabel='Time', ylabel='Cell')
+            ax_d.imshow(dg, aspect='auto')
+            ax_d.set(title=f'DG IC #{i}', xlabel='Time', ylabel='Cell')
+
+        plt.tight_layout()
+        os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+        fig.savefig(plot_path)
+        plt.close(fig)
+
+        # report mean errors
+        mean_abs = l2_errors.mean().item()
+        mean_rel = rel_l2_errors.mean().item()
+        print(f"Saved comparison heatmaps to {plot_path}")
+        print(f"Mean absolute L2 error: {mean_abs:.4e}")
+        print(f"Mean relative L2 error: {mean_rel:.4e}")
+
+    def run_solver(solver, dataset_path, batch_size):
+        """outputs the solution tensor"""
+        ds = HyperbolicDataset(dataset_path)
+        N = len(ds)
+        loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+        for batch_idx, batch in enumerate(loader):
+            start = batch_idx * batch_size
+            end   = start + batch['ic'].shape[0]
+
+            ic         = batch['ic'].to(solver.device)         # (B, 2)
+            sol_exact  = batch['sol_exact'].to(solver.device)  # (B, C, T)
+
+            # DG solve + averaging → (B, C, T)
+            sol_DG_large = solver.solve(ic)
+            sol_DG       = solver.cell_averaging(sol_DG_large)
+            return sol_DG
+
+
 
 
 
