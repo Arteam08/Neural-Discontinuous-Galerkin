@@ -10,7 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 
 import os
 
-def run_solver(solver, dataset_path, batch_size, plot_path):
+def plot_solver(solver, dataset_path, batch_size, plot_path):
     """
     Run the solver, compute per-sample absolute & relative L2 errors in one pass,
     and output comparison heatmaps for the first 3 ICs.
@@ -80,3 +80,22 @@ def run_solver(solver, dataset_path, batch_size, plot_path):
     print(f"Saved comparison heatmaps to {plot_path}")
     print(f"Mean absolute L2 error: {mean_abs:.4e}")
     print(f"Mean relative L2 error: {mean_rel:.4e}")
+
+def run_solver(solver, dataset_path, batch_size):
+    """outputs the solution tensor"""
+    ds = HyperbolicDataset(dataset_path)
+    N = len(ds)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+    for batch_idx, batch in enumerate(loader):
+        start = batch_idx * batch_size
+        end   = start + batch['ic'].shape[0]
+
+        ic         = batch['ic'].to(solver.device)         # (B, 2)
+        sol_exact  = batch['sol_exact'].to(solver.device)  # (B, C, T)
+
+        # DG solve + averaging → (B, C, T)
+        sol_DG_large = solver.solve(ic)
+        sol_DG       = solver.cell_averaging(sol_DG_large)
+        return sol_DG
+
+

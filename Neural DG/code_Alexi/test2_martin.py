@@ -6,7 +6,7 @@ import nn_arz.nn_arz.lwr.fluxes
 ####parameters
 dx= 0.5*1e-2
 n_cells = 300
-t_max = 1000
+t_max = 100
 dt=1e-3
 n_poly = 2
 points_per_cell = 20
@@ -69,7 +69,7 @@ solver= DG_solver(
     device='cpu',
 )
 
-run_solver(
+plot_solver(
     solver=solver,
     dataset_path=dataset_path,
     batch_size=64,
