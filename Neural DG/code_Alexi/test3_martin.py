@@ -21,6 +21,7 @@ checkpoint_folder="Neural DG/code_Alexi/checkpoints"
 save_name="MLP_riemann1.pt"
 
 
+
 dx=solver_params["dx"]
 n_cells = solver_params["n_cells"]
 t_max = solver_params["t_max"]
@@ -47,9 +48,11 @@ model.train_to_func(
     flow_func=flow_func,
     lr=1e-3,
     n_epochs=10**4,
-    batch_size=10**4,
+    batch_size=10**5,
     u_amplitude=10,
 )
+
+
 
 
 model.train_on_data(
@@ -60,7 +63,10 @@ model.train_on_data(
     lr=1e-3,
 )
 
-
+model.save_model(
+    save_folder=checkpoint_folder,
+    filename=save_name,
+)
 
 
 

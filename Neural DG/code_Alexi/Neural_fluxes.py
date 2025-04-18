@@ -52,88 +52,77 @@ class MLPFlux_2_value(nn.Module):
     
 
 
-    def train_to_func(self,
-                    flow_func,
-                    lr: float = 1e-3,
-                    n_epochs: int = 1000,
-                    loss_fn=nn.MSELoss(),
-                    batch_size: int = 1000,
-                    u_amplitude: float = 2):
-        """
-        Pretrains the NN to match the explicit flux function, then
-        plots NN vs ground‑truth flux + abs diff + loss curve.
-        """
+    def train_to_func(
+        self,
+        flow_func,
+        lr: float = 1e-3,
+        n_epochs: int = 1000,
+        loss_fn=nn.MSELoss(),
+        batch_size: int = 1000,
+        u_amplitude: float = 2
+    ):
+        """Pretrains the NN to match an explicit flux function, with visual diagnostics."""
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
-        losses = []
+        losses, rel_errors = [], []
 
-        # ---- Training loop ----
         for epoch in range(n_epochs):
-            # sample random interface states (batch,1)
             uL = torch.rand(batch_size, 1, device=self.device) * u_amplitude
             uR = torch.rand(batch_size, 1, device=self.device) * u_amplitude
 
-            # forward + loss
-            flux_pred = self.forward(uL, uR)                  # (batch,1)
+            flux_pred = self.forward(uL, uR)
             with torch.no_grad():
-                flux_true = flow_func(uL, uR)                 # (batch,1)
-            loss = loss_fn(flux_pred, flux_true)
-            losses.append(loss.item())
+                flux_true = flow_func(uL, uR)
 
-            # backward
+            loss = loss_fn(flux_pred, flux_true)
+            rel_error = (torch.norm(flux_pred - flux_true) / torch.norm(flux_true)).item()
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
+            losses.append(loss.item())
+            rel_errors.append(rel_error)
+
             if epoch % 100 == 0:
-                print(f'Epoch {epoch:4d}/{n_epochs}  Loss: {loss.item():.4e}')
+                print(f"Epoch {epoch:4d}/{n_epochs}  Loss: {loss.item():.4e}  RelErr: {rel_error:.4e}")
 
         print("Training finished")
 
-        # ---- Build evaluation grid ----
+        # --- Evaluation grid ---
         us = torch.linspace(-u_amplitude, u_amplitude, 100, device=self.device)
-        uLg, uRg = torch.meshgrid(us, us, indexing="ij")    # (100,100)
-        uLf = uLg.reshape(-1, 1)                            # (10000,1)
-        uRf = uRg.reshape(-1, 1)                            # (10000,1)
+        uLg, uRg = torch.meshgrid(us, us, indexing="ij")
+        uLf, uRf = uLg.reshape(-1, 1), uRg.reshape(-1, 1)
 
         with torch.no_grad():
-            f_nn_flat = self.forward(uLf, uRf)              # (10000,1)
-            f_gt_flat = flow_func(uLf, uRf)                 # (10000,1)
+            f_nn_flat = self.forward(uLf, uRf)
+            f_gt_flat = flow_func(uLf, uRf)
 
-        f_nn   = f_nn_flat.view(100, 100).cpu().numpy()     # (100,100)
-        f_gt   = f_gt_flat.view(100, 100).cpu().numpy()     # (100,100)
-        f_diff = np.abs(f_nn - f_gt)                        # (100,100)
+        f_nn = f_nn_flat.view(100, 100).cpu().numpy()
+        f_gt = f_gt_flat.view(100, 100).cpu().numpy()
+        f_diff = np.abs(f_nn - f_gt)
+        rel_err_grid = f_diff / (np.abs(f_gt) + 1e-8)
 
-        # shared color‐scale for NN vs GT
-        vmin = min(f_nn.min(), f_gt.min())
-        vmax = max(f_nn.max(), f_gt.max())
+        # --- Plots ---
         extent = [-u_amplitude, u_amplitude, -u_amplitude, u_amplitude]
-
-        # ---- Plot everything in 2×2 ----
         fig, axes = plt.subplots(2, 2, figsize=(10, 8))
 
-        # [0,0] NN-predicted flux
-        im0 = axes[0,0].imshow(f_nn, origin="lower", aspect="auto",
-                            extent=extent, vmin=vmin, vmax=vmax)
+        im0 = axes[0,0].imshow(f_nn, origin="lower", extent=extent, aspect="auto")
         axes[0,0].set(title="NN‑predicted flux", xlabel="u_R", ylabel="u_L")
         fig.colorbar(im0, ax=axes[0,0])
 
-        # [0,1] Ground-truth flux
-        im1 = axes[0,1].imshow(f_gt, origin="lower", aspect="auto",
-                            extent=extent, vmin=vmin, vmax=vmax)
+        im1 = axes[0,1].imshow(f_gt, origin="lower", extent=extent, aspect="auto")
         axes[0,1].set(title="Ground‑truth flux", xlabel="u_R", ylabel="u_L")
         fig.colorbar(im1, ax=axes[0,1])
 
-        # [1,0] Absolute difference
-        im2 = axes[1,0].imshow(f_diff, origin="lower", aspect="auto",
-                            extent=extent)
-        axes[1,0].set(title="|NN – GT|", xlabel="u_R", ylabel="u_L")
+        im2 = axes[1,0].imshow(rel_err_grid, origin="lower", extent=extent, aspect="auto")
+        axes[1,0].set(title="Relative error", xlabel="u_R", ylabel="u_L")
         fig.colorbar(im2, ax=axes[1,0])
 
-        # [1,1] Loss evolution
-        axes[1,1].plot(range(n_epochs), losses)
-        axes[1,1].set_yscale('log')
-        axes[1,1].set(title="Training loss evolution",
-                    xlabel="Epoch", ylabel="MSE Loss")
+        axes[1,1].plot(losses, label="Loss (MSE)")
+        axes[1,1].plot(rel_errors, label="Rel. Error")
+        axes[1,1].set_yscale("log")
+        axes[1,1].set(title="Training curves", xlabel="Epoch")
+        axes[1,1].legend()
 
         plt.tight_layout()
         plt.show()
