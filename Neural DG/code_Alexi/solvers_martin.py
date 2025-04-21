@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from generate_data_martin import *
 
 
+
 ###define default basis
 
 import torch
@@ -81,10 +82,10 @@ class DG_solver():
               dx, # space step
               dt,
               n_cells, # number of cells
-              flow_func, # flow function, exact arguments to be clarified
+              flow_func, 
+              device,# flow function, exact arguments to be clarified
               points_per_cell=40, # number of points per cell, can be replaced by a quadrature for less space storage
               n_poly=2,
-              device='cpu',
                 ):
 
         self.t_max = t_max
@@ -177,6 +178,8 @@ class DG_solver():
 
         fluxes = self.flow_func(left_boundaries, right_boundaries) # à modifier pour accpeter des formes plus générales
 
+        # print("uvalues",torch.max(left_boundaries), torch.min(left_boundaries))
+
         # !! Right polynomial values not implemented
         fluxes = fluxes[:, 1:].unsqueeze(1)*self.right_polynomials_value - fluxes[:, :-1].unsqueeze(1) * self.left_polynomials_value
                         
@@ -213,6 +216,8 @@ class DG_solver():
 
                 solution_DG[:, :, t] = torch.einsum('ijk,ijl->ikl', self.basis_func, weights_dg).permute(0, 2, 1).reshape(n_ic, -1)
         return solution_DG
+
+
     
     def cell_averaging(self, solution_dg):
         """post processing of the solution_DG tensor to aveage it over each cell"""
@@ -239,6 +244,9 @@ class DG_solver():
         l2_errors      = torch.empty(N, device=device)  # (N,)
         rel_l2_errors  = torch.empty(N, device=device)  # (N,)
 
+        l1_errors      = torch.empty(N, device=device)
+        rel_l1_errors  = torch.empty(N, device=device)
+
         # Batch-wise solve & error
         for batch_idx, batch in enumerate(loader):
             start = batch_idx * batch_size
@@ -261,11 +269,19 @@ class DG_solver():
             # exact-solution L2 per sample
             norm_exact = torch.sqrt((flat_exact**2).sum(dim=1))   # (B,)
             # relative L2 = abs / exact
-            rel_l2_batch = l2_batch / norm_exact                  # (B,)
+            rel_l2_batch = l2_batch / (norm_exact +1e-8)                 # (B,)
+            l1_batch = flat_diff.abs().sum(dim=1)                  # (B,)
+            l1_exact = flat_exact.abs().sum(dim=1)                 # (B,)
+            rel_l1_batch = l1_batch / (l1_exact + 1e-8)            # avoid divide-by-zero
+
 
             # store
             l2_errors[start:end]     = l2_batch
             rel_l2_errors[start:end] = rel_l2_batch
+
+            l1_errors[start:end]     = l1_batch
+            rel_l1_errors[start:end] = rel_l1_batch
+
 
         # --- Plot heatmaps for the first 3 ICs ---
         full_data = torch.load(dataset_path)
@@ -288,13 +304,19 @@ class DG_solver():
         plt.close(fig)
 
         # report mean errors
-        mean_abs = l2_errors.mean().item()
-        mean_rel = rel_l2_errors.mean().item()
-        print(f"Saved comparison heatmaps to {plot_path}")
-        print(f"Mean absolute L2 error: {mean_abs:.4e}")
-        print(f"Mean relative L2 error: {mean_rel:.4e}")
+        mean_abs_l2 = l2_errors.mean().item()
+        mean_rel_l2 = rel_l2_errors.mean().item()
+        mean_abs_l1 = l1_errors.mean().item()
+        mean_rel_l1 = rel_l1_errors.mean().item()
 
-    def run_solver(solver, dataset_path, batch_size):
+        print(f"Saved comparison heatmaps to {plot_path}")
+        print(f"Mean absolute L2 error: {mean_abs_l2:.4e}")
+        print(f"Mean relative L2 error: {mean_rel_l2:.4e}")
+        print(f"Mean absolute L1 error: {mean_abs_l1:.4e}")
+        print(f"Mean relative L1 error: {mean_rel_l1:.4e}")
+
+
+    def run_solver(self, dataset_path, batch_size):
         """outputs the solution tensor"""
         ds = HyperbolicDataset(dataset_path)
         N = len(ds)
@@ -303,13 +325,70 @@ class DG_solver():
             start = batch_idx * batch_size
             end   = start + batch['ic'].shape[0]
 
-            ic         = batch['ic'].to(solver.device)         # (B, 2)
-            sol_exact  = batch['sol_exact'].to(solver.device)  # (B, C, T)
+            ic         = batch['ic'].to(self.device)         # (B, 2)
+            sol_exact  = batch['sol_exact'].to(self.device)  # (B, C, T)
 
             # DG solve + averaging → (B, C, T)
-            sol_DG_large = solver.solve(ic)
-            sol_DG       = solver.cell_averaging(sol_DG_large)
+            sol_DG_large = self.solve(ic)
+            sol_DG       = self.cell_averaging(sol_DG_large)
             return sol_DG
+
+
+    def compute_metrics(self, loader):
+        """commutes L1 and L2 performance from a dataloader"""
+        N=len(loader.dataset)
+        l2_errors      = torch.empty(N, device=self.device)  # (N,)
+        rel_l2_errors  = torch.empty(N, device=self.device)  # (N,)
+
+        l1_errors      = torch.empty(N, device=self.device)
+        rel_l1_errors  = torch.empty(N, device=self.device)
+
+        # Batch-wise solve & error
+        for batch_idx, batch in enumerate(loader):
+            start = batch_idx * loader.batch_size
+            end   = start + batch['ic'].shape[0]
+
+            ic         = batch['ic'].to(self.device)         # (B, 2)
+            sol_exact  = batch['sol_exact'].to(self.device)  # (B, C, T)
+
+            # DG solve + averaging → (B, C, T)
+            sol_DG_large = self.solve(ic)
+            sol_DG       = self.cell_averaging(sol_DG_large)
+
+            # flatten spatial/time dims
+            diff = sol_DG - sol_exact                  # (B, C, T)
+            flat_diff = diff.view(diff.shape[0], -1)   # (B, C*T)
+            flat_exact = sol_exact.view(sol_exact.shape[0], -1)  # (B, C*T)
+
+            # absolute L2 per sample
+            l2_batch = torch.sqrt((flat_diff**2).sum(dim=1))       # (B,)
+            # exact-solution L2 per sample
+            norm_exact = torch.sqrt((flat_exact**2).sum(dim=1))   # (B,)
+            # relative L2 = abs / exact
+            rel_l2_batch = l2_batch / (norm_exact +1e-8)                 # (B,)
+            l1_batch = flat_diff.abs().sum(dim=1)                  # (B,)
+            l1_exact = flat_exact.abs().sum(dim=1)                 # (B,)
+            rel_l1_batch = l1_batch / (l1_exact + 1e-8)            # avoid divide-by-zero
+
+
+            # store
+            l2_errors[start:end]     = l2_batch
+            rel_l2_errors[start:end] = rel_l2_batch
+
+            l1_errors[start:end]     = l1_batch
+            rel_l1_errors[start:end] = rel_l1_batch
+        mean_abs_l2 = l2_errors.mean().item()
+        mean_rel_l2 = rel_l2_errors.mean().item()
+        mean_abs_l1 = l1_errors.mean().item()
+        mean_rel_l1 = rel_l1_errors.mean().item()
+
+        return mean_abs_l1,  mean_rel_l1, mean_abs_l2,mean_rel_l2
+
+
+
+
+
+
 
 
 

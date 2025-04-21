@@ -69,9 +69,7 @@ solver= DG_solver(
     device='cpu',
 )
 
-plot_solver(
-    solver=solver,
-    dataset_path=dataset_path,
+solver.plot_solver(dataset_path=dataset_path,
     batch_size=64,
     plot_path=os.path.join(plots_folder, "heatmaps"),
 )

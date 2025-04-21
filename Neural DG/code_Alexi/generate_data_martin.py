@@ -1,7 +1,6 @@
 import os
 import torch
 import numpy as np
-from solvers_martin import DG_solver
 import nn_arz.nn_arz.lwr.explicit as expl
 import nn_arz.nn_arz.lwr.fluxes as fluxes
 import nn_arz.nn_arz.lwr.lax_hopf
