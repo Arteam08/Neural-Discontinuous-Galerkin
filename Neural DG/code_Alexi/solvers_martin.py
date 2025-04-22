@@ -71,6 +71,10 @@ def get_default_basis(n_poly, dx, points_per_cell, device):
     right_polynomials_value = torch.ones_like(left_polynomials_value)
     return polynomials, polynomials_prime, mass_matrix, mass_matrix_inv, weights_leggauss, left_polynomials_value, right_polynomials_value
 
+def soft_clamp_sp(x, a, b):
+    # F.softplus(z) = log(1 + exp(z))
+    return a + F.softplus(x - a) - F.softplus(x - b)
+
 
 
 
@@ -171,12 +175,27 @@ class DG_solver():
         # this is done to avoid the in-place operation and let the gradients be computed
         u_prev = u_prev.clone()
 
+
+        ##############
+        ###Artificial stabilization####@@@@
+        u_max=4
+        u_prev=u_prev.clamp(min=-1, max=5) # to avoid the NaN, it is observed that enabling small excesses improves performance // to be made deiiferntiable
+
+
+
+        assert not torch.isnan(u_prev).any(), "u_prev is NaN"
+        # print("u_prev",torch.max(u_prev).item(), torch.min(u_prev).item())
+
         left_boundaries  = u_prev[:, self.left_boundary_indexes]
         right_boundaries = u_prev[:, self.right_boundary_indexes]
         f_u   = self.f_PDE(u_prev)
+        assert not torch.isnan(f_u).any(), "f_u is NaN"
+        # print("f_u",torch.max(f_u).item(), torch.min(f_u).item())
   
 
         fluxes = self.flow_func(left_boundaries, right_boundaries) # à modifier pour accpeter des formes plus générales
+        assert not torch.isnan(fluxes).any(), "fluxes is NaN"
+        # print("fluxes",torch.max(fluxes).item(), torch.min(fluxes).item())
 
         # print("uvalues",torch.max(left_boundaries), torch.min(left_boundaries))
 
@@ -184,6 +203,7 @@ class DG_solver():
         fluxes = fluxes[:, 1:].unsqueeze(1)*self.right_polynomials_value - fluxes[:, :-1].unsqueeze(1) * self.left_polynomials_value
                         
         fluxes = (self.mass_matrix_inv * fluxes)
+
         # plt.plot(fluxes[0, 1,:].cpu().detach().numpy())
         # plt.show()
                         
@@ -199,22 +219,25 @@ class DG_solver():
                 ) 
             ).sum(dim=2) * self.dx / 2
         ).float() # M^-1*(f|phi')
+        assert not torch.isnan(residual).any(), "residual is NaN"
         L=-fluxes+residual
         return L
     
     def solve(self, initial_conditions):
         weights_dg, solution_DG, n_ic = self.process_initial_conditions(initial_conditions)
-        assert solution_DG.shape==(n_ic, self.n_cells * self.points_per_cell, self.t_max), f"solution_DG shape {solution_DG.shape} is not correct"
         for t in range(1, self.t_max):
             weights_dg_save = weights_dg.clone() #Ut
             for a in range(2):
                 #RK2
                 #U{t-1} si a =0, U{t} si a=1
                 L=self.compute_L(solution_DG, t, a)
+                assert not torch.isnan(L).any(), "L is NaN"
+
         
                 weights_dg = weights_dg_save + (self.dt*L).squeeze(1) * (1/2 if a==0 else 1.) #weights_dg is not saved but used in the solution
 
                 solution_DG[:, :, t] = torch.einsum('ijk,ijl->ikl', self.basis_func, weights_dg).permute(0, 2, 1).reshape(n_ic, -1)
+                assert not torch.isnan(solution_DG).any(), "RK is NaN"
         return solution_DG
 
 

@@ -7,7 +7,11 @@ import numpy as np
 from torch.utils.data import DataLoader
 from generate_data_martin import generate_riemann_dataset
 from solvers_martin import DG_solver
+from torch.utils.tensorboard import SummaryWriter
+
 import nn_arz.nn_arz.lwr.fluxes
+
+
 
 
 
@@ -25,6 +29,8 @@ class BaseFluxModel(nn.Module):
     def train_to_func(
         self,
         flow_func,
+        checkpoint_folder,
+        pre_train_name,
         lr: float = 1e-3,
         n_epochs: int = 1000,
         loss_fn=nn.MSELoss(),
@@ -62,6 +68,7 @@ class BaseFluxModel(nn.Module):
 
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}/{n_epochs} | Loss: {loss.item():.4e} | RelL2: {rel_l2:.4e} | RelL1: {rel_l1:.4e}")
+                self.save(checkpoint_folder, pre_train_name)
 
         print("Training to function finished.")
         self._plot_pretrain(u_amplitude, flow_func, losses, rel_l2s)
@@ -107,23 +114,65 @@ class BaseFluxModel(nn.Module):
         plt.savefig("Neural DG/code_Alexi/plots/pretrain_diagnostics.png")
         plt.close()
 
+    def train_consistency(self, flow_func, n_epochs, batch_size, sheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau, lr=1e-3, u_amplitude=4):
+        """trains the NN to be consistent, and to be monotonous"""
+        self.train()
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        scheduler = sheduler_class(optimizer, mode='min', patience=100, factor=0.5, verbose=True)
+        losses, rel_l2s, rel_l1s = [], [], []
+        for epoch in range(n_epochs):
+            # Sample uniformly on [0, u_amplitude]
+            u = torch.rand(batch_size, 1, device=self.device) * u_amplitude
+            f_hat_uu= self.forward(u, u)
+            with torch.no_grad():
+                f_u = flow_func(u, u)
+        
+            
+            diff = f_u - f_hat_uu
+            consist_loss = torch.mean((diff)**2)
+            
+
+            loss = consist_loss
+            rel_l2 = (torch.norm(diff) / torch.norm(f_u)).item()
+            rel_l1 = (torch.norm(diff, p=1) / torch.norm(f_u, p=1)).item()
+            
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step(loss.item())
+
+            losses.append(loss.item())
+            rel_l2s.append(rel_l2)
+            rel_l1s.append(rel_l1)
+            if epoch % 100 == 0:
+                print(f"Epoch {epoch}/{n_epochs} | Loss: {loss.item():.4e} | RelL2: {rel_l2:.4e} | RelL1: {rel_l1:.4e}")
+        print("Training to function finished.")
+        self._plot_pretrain(u_amplitude, flow_func, losses, rel_l2s)
+
+
 
     def train_on_data(
-    self,
-    dataset_path,
-    solver_params,
-    batch_size: int = 1000,
-    n_epochs: int   = 1000,
-    lr: float       = 1e-3,
-    loss_fn         = nn.MSELoss(),
-    benchmark_flow_func=nn_arz.nn_arz.lwr.fluxes.godunov_flux_greenshield,
-    save_folder: str = "Neural DG/code_Alexi/checkpoints",
-    save_name_prefix: str = "model_data",
-    best_model_name: str = "best_model.pt"
-        ):
+        self,
+        dataset_path,
+        solver_params,
+        batch_size: int = 1000,
+        n_epochs: int   = 1000,
+        lr: float       = 1e-3,
+        loss_fn         = nn.MSELoss(),
+        benchmark_flow_func=nn_arz.nn_arz.lwr.fluxes.godunov_flux_greenshield,
+        save_folder: str = "Neural DG/code_Alexi/checkpoints",
+        save_name_prefix: str = "model_data",
+        TENSOR_LOG: bool = False,
+            ):
   
         os.makedirs(save_folder, exist_ok=True)
         best_loss = float('inf')
+        if TENSOR_LOG:
+            log_dir = os.path.join("runs", save_name_prefix)
+            writer = SummaryWriter(log_dir=log_dir)
+  
+
 
         # --- Benchmark at start ---
         ds_bench = __import__('generate_data_martin').HyperbolicDataset(dataset_path)
@@ -143,9 +192,9 @@ class BaseFluxModel(nn.Module):
         l1_bis, l1_rel_bis, l2_bis, l2_rel_bis = solver2.compute_metrics(loader_bench)
 
         print(f"""\
-    Model     | L2 Abs: {l2:.4e} | L2 Rel: {l2_rel:.4e} | L1 Abs: {l1:.4e} | L1 Rel: {l1_rel:.4e}
-    Benchmark | L2 Abs: {l2_bis:.4e} | L2 Rel: {l2_rel_bis:.4e} | L1 Abs: {l1_bis:.4e} | L1 Rel: {l1_rel_bis:.4e}
-    """)
+        Model     | L2 Abs: {l2:.4e} | L2 Rel: {l2_rel:.4e} | L1 Abs: {l1:.4e} | L1 Rel: {l1_rel:.4e}
+        Benchmark | L2 Abs: {l2_bis:.4e} | L2 Rel: {l2_rel_bis:.4e} | L1 Abs: {l1_bis:.4e} | L1 Rel: {l1_rel_bis:.4e}
+        """)
 
         # --- Now training loop ---
         ds_train = __import__('generate_data_martin').HyperbolicDataset(dataset_path)
@@ -196,14 +245,12 @@ class BaseFluxModel(nn.Module):
 
             # overwrite the “last” checkpoint every 50 epochs
             if epoch % 50 == 0:
-                last_path = os.path.join(save_folder, f"{save_name_prefix}.pt")
-                torch.save(self.state_dict(), last_path)
+                self.save(save_folder, f"{save_name_prefix}_last.pt")
 
             # save best model when improved
             if avg_loss < best_loss:
                 best_loss = avg_loss
-                best_path = os.path.join(save_folder, best_model_name)
-                torch.save(self.state_dict(), best_path)
+                self.save(save_folder, f"{save_name_prefix}_best.pt")
 
             # original per-epoch display
             if epoch % 10 == 0 or epoch == n_epochs - 1:
@@ -213,6 +260,19 @@ class BaseFluxModel(nn.Module):
                     f"RelL2: {avg_rel_l2:.4e} - "
                     f"RelL1: {avg_rel_l1:.4e}"
                 )
+                #print the convergence metrics
+                consistency_percentage, negativity_uL, positivity_uR = self.convergence_metrics(flow_func=benchmark_flow_func, amplitude=4, n_eval=100)
+                print(f"Consistency: {consistency_percentage:.4e} | Negativity uL: {negativity_uL:.4e} | Positivity uR: {positivity_uR:.4e}")
+                if TENSOR_LOG:
+                    writer.add_scalar("Loss/train", avg_loss, epoch)
+                    writer.add_scalar("RelL2/train", avg_rel_l2, epoch)
+                    writer.add_scalar("RelL1/train", avg_rel_l1, epoch)
+                    writer.add_scalar("Convergence/Consistency", consistency_percentage, epoch)
+                    writer.add_scalar("Convergence/Negativity_uL", negativity_uL, epoch)
+                    writer.add_scalar("Convergence/Positivity_uR", positivity_uR, epoch)
+
+        if TENSOR_LOG:
+            writer.close()
 
         return losses
 
@@ -228,7 +288,42 @@ class BaseFluxModel(nn.Module):
             'init_kwargs': self._init_kwargs,
             'state_dict': self.state_dict()
         }, full_path)
-        print(f"Model + metadata saved to {full_path}")
+        # print(f"Model + metadata saved to {full_path}")
+
+    def convergence_metrics(self, flow_func=nn_arz.nn_arz.lwr.fluxes.godunov_flux_greenshield, amplitude=2, n_eval=100):
+        """ Compute the consitency metrics, as well as monotoniciy metrics for the model"""
+        # Unifom evalution grid, wiht identic uL and uR
+        us = torch.linspace(0, amplitude, n_eval, device=self.device)
+        uLg, uRg = torch.meshgrid(us, us, indexing='ij') #shape (n_eval, n_eval)
+        # uLf, uRf = uLg.reshape(-1, 1), uRg.reshape(-1, 1) #shape (n_eval*n_eval, 1)
+        uLf = uLg.reshape(-1, 1).requires_grad_()
+        uRf = uRg.reshape(-1, 1).requires_grad_()   
+        
+        f_nn_flat = self.forward(uLf, uRf)
+        f_gt_flat = flow_func(uLf, uRf)
+        #indicates whether the model is consistent
+        consistency_percentage = torch.mean((torch.abs(f_nn_flat - f_gt_flat)))/(torch.mean(torch.abs(f_gt_flat))+1e-8)
+
+        #computer monotonicity inidicators
+        grad_outputs = torch.ones_like(f_nn_flat)
+
+        grads = torch.autograd.grad(
+        outputs=f_nn_flat,
+        inputs=[uLf, uRf],
+        grad_outputs=grad_outputs,
+        create_graph=True
+        )
+        dF_duL, dF_duR = grads
+
+        negativity_uL = torch.mean((dF_duL < 0).float()).item()
+        positivity_uR = torch.mean((dF_duR > 0).float()).item()
+        #maybe make these relative to the max value of the gradient
+
+
+        return consistency_percentage.item(), negativity_uL, positivity_uR
+        
+
+
 
     @classmethod
     def load(cls, filepath: str, device: str = None):
@@ -268,12 +363,13 @@ class MLPFlux_2_value(BaseFluxModel):
                 nn.init.xavier_uniform_(layer.weight)
                 nn.init.zeros_(layer.bias)
 
-    def forward(self, uL, uR):
+    def forward(self, uL, uR, u_max=4):
         B, N = uL.shape
         x = torch.stack([uL, uR], dim=-1).view(B*N, 2)
         for lin in self.layers[:-1]:
             x = self.activation(lin(x))
         x = self.layers[-1](x)
+        x = 0.5 *(u_max+1) * (torch.tanh(x / u_max)+1)-0.5#rescales to [-0.5, 4.5]
         return x.view(B, N)
 
 
